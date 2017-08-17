@@ -91,16 +91,70 @@ int main() {
           double py = j[1]["y"];
           double psi = j[1]["psi"];
           double v = j[1]["speed"];
-
+            double acceleration = j[1]["throttle"];
+            double steering_angle = j[1]["steering_angle"];
+            
           /*
           * TODO: Calculate steering angle and throttle using MPC.
           *
           * Both are in between [-1, 1].
           *
           */
+            
           double steer_value;
           double throttle_value;
 
+            
+            vector<double> local_ptsx;
+            vector<double> local_ptsy;
+            
+            // .. transform reference trajectory in car's local coordinates
+            for (int i = 0; i < ptsx.size(); i++) {
+                double x_local = (ptsx[i] - px)*cos(-psi) - (ptsy[i] - py)*sin(-psi);
+                double y_local = (ptsx[i] - px)*sin(-psi) + (ptsy[i] - py)*cos(-psi);
+                
+                local_ptsx.push_back(x_local);
+                local_ptsy.push_back(y_local);
+            }
+            
+            // this is needed for polyfit to work, to calculate the coeffs
+            // (https://forum.kde.org/viewtopic.php?f=74&t=94839)
+            double* local_ptsx_ptr = &local_ptsx[0];
+            double* local_ptsy_ptr = &local_ptsy[0];
+            Eigen::Map<Eigen::VectorXd> ptsx_vect(local_ptsx_ptr, local_ptsx.size());
+            Eigen::Map<Eigen::VectorXd> ptsy_vect(local_ptsy_ptr, local_ptsy.size());
+            
+            auto coeffs = polyfit(ptsx_vect, ptsy_vect, 3);
+            
+            // take latency into account
+            const double latency = 0.1;
+            const double Lf = 2.67;
+            
+            double x_car_latency = latency * v * cos(steering_angle);
+            double y_car_latency = latency * v * sin(steering_angle);
+            double v_car_latency = v + latency * acceleration;
+            double steer_car_latency = v * steering_angle/Lf * latency;
+            
+            // The cross track error is calculated by evaluating at polynomial at x, f(x)
+            // and subtracting y.
+            double cte = polyeval(coeffs, x_car_latency) - y_car_latency;
+            
+            std::cout << "cte : " << cte << std::endl;
+            
+            // Due to the sign starting at 0, the orientation error is -f'(x).
+            // derivative of coeffs[0] + coeffs[1] * x + coeff[2] * x^2 + coeff[3] * x^3-> coeffs[1]
+            double epsi = steer_car_latency - atan(coeffs[1] + 2 * coeffs[2] * x_car_latency + 3 * coeffs[3] * x_car_latency * x_car_latency);
+
+            
+            Eigen::VectorXd state(6);
+            
+            state << x_car_latency, y_car_latency, steer_car_latency, v_car_latency, cte, epsi;
+            
+            auto vars = mpc.Solve(state, coeffs);
+            steer_value = -vars[6]/deg2rad(25);
+            throttle_value = vars[7];
+            
+            
           json msgJson;
           // NOTE: Remember to divide by deg2rad(25) before you send the steering value back.
           // Otherwise the values will be in between [-deg2rad(25), deg2rad(25] instead of [-1, 1].
