@@ -6,8 +6,9 @@
 using CppAD::AD;
 
 // TODO: Set the timestep length and duration
-size_t N = 25 ;
-double dt = 0.05 ;
+size_t N = 10;
+double dt = 0.1;
+int latency_ind = 1;
 
 // This value assumes the model presented in the classroom is used.
 //
@@ -57,33 +58,32 @@ class FG_eval {
       // TODO: Define the cost related the reference state and
       // any anything you think may be beneficial.
       
-      double cte_coeff = 5;
-      double epsi_coeff = 500;
-      double ref_v_coeff = 1;
       
-      double delta_coeff = 20000;
-      double a_coeff = 10;
-      
-      double delta_diff_coeff = 10000;
-      double a_diff_coeff = 1;
+      double cte_tune = 1.0;
+      double epsi_tune = 1.0;
+      double ref_v_tune = 1.0;
+      double delta_tune = 1.0;
+      double a_tune = 10.0;
+      double delta_diff_tune = 600.0;
+      double a_diff_tune = 1.0;
       
       // The part of the cost based on the reference state.
       for (int t = 0; t < N; t++) {
-          fg[0] += cte_coeff*CppAD::pow(vars[cte_start + t], 2);
-          fg[0] += epsi_coeff*CppAD::pow(vars[epsi_start + t], 2);
-          fg[0] += ref_v_coeff*CppAD::pow(vars[v_start + t] - ref_v, 2);
+          fg[0] += cte_tune*CppAD::pow(vars[cte_start + t], 2);
+          fg[0] += epsi_tune*CppAD::pow(vars[epsi_start + t], 2);
+          fg[0] += ref_v_tune*CppAD::pow(vars[v_start + t] - ref_v, 2);
       }
       
-      // Minimize the use of actuators.
+      // Minimize change rate of control.
       for (int t = 0; t < N - 1; t++) {
-          fg[0] += delta_coeff*CppAD::pow(vars[delta_start + t], 2);
-          fg[0] += a_coeff*CppAD::pow(vars[a_start + t], 2);
+          fg[0] += delta_tune*CppAD::pow(vars[delta_start + t], 2);
+          fg[0] += a_tune*CppAD::pow(vars[a_start + t], 2);
       }
       
       // Minimize the value gap between sequential actuations.
       for (int t = 0; t < N - 2; t++) {
-          fg[0] += delta_diff_coeff*CppAD::pow(vars[delta_start + t + 1] - vars[delta_start + t], 2);
-          fg[0] += a_diff_coeff*CppAD::pow(vars[a_start + t + 1] - vars[a_start + t], 2);
+          fg[0] += delta_diff_tune*CppAD::pow(vars[delta_start + t + 1] - vars[delta_start + t], 2);
+          fg[0] += a_diff_tune*CppAD::pow(vars[a_start + t + 1] - vars[a_start + t], 2);
       }
       
       
@@ -121,8 +121,8 @@ class FG_eval {
           AD<double> delta0 = vars[delta_start + t - 1];
           AD<double> a0 = vars[a_start + t - 1];
           
-          AD<double> f0 = coeffs[0] + coeffs[1] * x0;
-          AD<double> psides0 = CppAD::atan(coeffs[1]);
+          AD<double> f0 = coeffs[0] + coeffs[1] * x0 + coeffs[2]*CppAD::pow(x0,2) + coeffs[3]*CppAD::pow(x0,3) ;
+          AD<double> psides0 = CppAD::atan(coeffs[1] + 2*coeffs[2]*x0 + 3*coeffs[3]*CppAD::pow(x0,2) ) ;
           
           // Here's `x` to get you started.
           // The idea here is to constraint this value to be 0.
@@ -148,10 +148,16 @@ class FG_eval {
 //
 // MPC class definition implementation.
 //
-MPC::MPC() {}
+MPC::MPC() : prev_delta(0.0), prev_a(0.1) {}
 MPC::~MPC() {}
 
-vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
+int MPC::getLatencyIndex()
+{
+    double latency_target = 0.1;
+    return (int)(latency_target/dt);
+}
+
+ResultVectors MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
     //size_t i;
     typedef CPPAD_TESTVECTOR(double) Dvector;
     
@@ -200,12 +206,20 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
         vars_lowerbound[i] = -0.436332;
         vars_upperbound[i] = 0.436332;
     }
+    for (int i = delta_start; i < delta_start+latency_ind; i++) {
+        vars_lowerbound[i] = prev_delta;
+        vars_upperbound[i] = prev_delta;
+    }
     
     // Acceleration/decceleration upper and lower limits.
     // NOTE: Feel free to change this to something else.
     for (int i = a_start; i < n_vars; i++) {
         vars_lowerbound[i] = -1.0;
         vars_upperbound[i] = 1.0;
+    }
+    for (int i = a_start; i < a_start+latency_ind; i++) {
+        vars_lowerbound[i] = prev_a;
+        vars_upperbound[i] = prev_a;
     }
     
     // Lower and upper limits for constraints
@@ -256,8 +270,29 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
     
     auto cost = solution.obj_value;
     std::cout << "Cost " << cost << std::endl;
-    return {solution.x[x_start + 1],   solution.x[y_start + 1],
+    /*return {solution.x[x_start + 1],   solution.x[y_start + 1],
         solution.x[psi_start + 1], solution.x[v_start + 1],
         solution.x[cte_start + 1], solution.x[epsi_start + 1],
-        solution.x[delta_start], solution.x[a_start]};
+        solution.x[delta_start], solution.x[a_start]};*/
+    
+    ResultVectors result;
+    for (int i=0; i<N-1; i++)
+    {
+        result.delta.push_back(solution.x[delta_start  + i]);
+    }
+    for (int i=0; i<N-1; i++)
+    {
+        result.a.push_back(solution.x[a_start  + i]);
+    }
+    
+    for (int i=0; i<N; i++)
+    {
+        result.x.push_back(solution.x[x_start  + i]);
+    }
+    for (int i=0; i<N; i++)
+    {
+        result.y.push_back(solution.x[y_start  + i]);
+    }
+    
+    return result;
 }
